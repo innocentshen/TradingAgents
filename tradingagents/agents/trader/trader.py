@@ -1,11 +1,13 @@
 import functools
 import time
 import json
+from tradingagents.asset_utils import get_asset_context
 
 
 def create_trader(llm, memory):
     def trader_node(state, name):
-        company_name = state["company_of_interest"]
+        asset_name = state["company_of_interest"]
+        asset_context = get_asset_context(asset_name)
         investment_plan = state["investment_plan"]
         market_research_report = state["market_report"]
         sentiment_report = state["sentiment_report"]
@@ -24,7 +26,7 @@ def create_trader(llm, memory):
 
         context = {
             "role": "user",
-            "content": f"Based on a comprehensive analysis by a team of analysts, here is an investment plan tailored for {company_name}. This plan incorporates insights from current technical market trends, macroeconomic indicators, and social media sentiment. Use this plan as a foundation for evaluating your next trading decision.\n\nProposed Investment Plan: {investment_plan}\n\nLeverage these insights to make an informed and strategic decision.",
+            "content": f"Based on a comprehensive analysis by a team of analysts, here is an investment plan tailored for {asset_name}, a {asset_context['asset_label']}. This plan incorporates insights from current technical market trends, macroeconomic indicators, sentiment, and fundamentals. Use this plan as a foundation for evaluating your next trading decision.\n\nProposed Investment Plan: {investment_plan}\n\nLeverage these insights to make an informed and strategic decision.",
         }
 
         messages = [

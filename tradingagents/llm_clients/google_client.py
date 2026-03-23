@@ -1,9 +1,95 @@
+import os
+import time
 from typing import Any, Optional
 
+import httpx
 from langchain_google_genai import ChatGoogleGenerativeAI
+from pydantic import PrivateAttr
 
 from .base_client import BaseLLMClient
 from .validators import validate_model
+
+DEFAULT_TRANSPORT_MAX_RETRIES = 4
+DEFAULT_TRANSPORT_RETRY_BACKOFF = 1.0
+DEFAULT_TRANSPORT_RETRY_BACKOFF_MULTIPLIER = 2.0
+DEFAULT_TRANSPORT_RETRY_MAX_BACKOFF = 12.0
+
+RETRYABLE_EXCEPTION_NAME_MARKERS = (
+    "transporterror",
+    "timeoutexception",
+    "remoteprotocolerror",
+    "serviceunavailable",
+    "internalservererror",
+    "deadlineexceeded",
+    "resourceexhausted",
+    "toomanyrequests",
+)
+
+RETRYABLE_MESSAGE_MARKERS = (
+    "server disconnected without sending a response",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "connection dropped",
+    "temporarily unavailable",
+    "deadline exceeded",
+    "timed out",
+    "timeout",
+    "503",
+    "502",
+    "504",
+    "429",
+    "rate limit",
+    "resource exhausted",
+    "remote protocol error",
+)
+
+NON_RETRYABLE_MESSAGE_MARKERS = (
+    "api key not valid",
+    "permission denied",
+    "forbidden",
+    "invalid argument",
+    "unsupported",
+    "unauthenticated",
+    "authentication",
+    "401",
+    "403",
+)
+
+
+def _unique_non_empty(values: list[Optional[str]]) -> list[str]:
+    deduped: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def _resolve_google_api_key_candidates(explicit_key: Optional[str] = None) -> list[str]:
+    return _unique_non_empty(
+        [
+            explicit_key,
+            os.getenv("GOOGLE_API_KEY"),
+            os.getenv("GEMINI_API_KEY"),
+        ]
+    )
+
+
+def _is_retryable_google_exception(exc: Exception) -> bool:
+    if isinstance(exc, httpx.TransportError):
+        return True
+
+    message = str(exc).lower()
+    if any(marker in message for marker in NON_RETRYABLE_MESSAGE_MARKERS):
+        return False
+
+    exc_name = exc.__class__.__name__.lower()
+    if any(marker in exc_name for marker in RETRYABLE_EXCEPTION_NAME_MARKERS):
+        return True
+
+    return any(marker in message for marker in RETRYABLE_MESSAGE_MARKERS)
 
 
 class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
@@ -12,6 +98,53 @@ class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
     Gemini 3 models return content as list: [{'type': 'text', 'text': '...'}]
     This normalizes to string for consistent downstream handling.
     """
+
+    _transport_max_retries: int = PrivateAttr(default=DEFAULT_TRANSPORT_MAX_RETRIES)
+    _transport_retry_backoff: float = PrivateAttr(default=DEFAULT_TRANSPORT_RETRY_BACKOFF)
+    _transport_retry_backoff_multiplier: float = PrivateAttr(
+        default=DEFAULT_TRANSPORT_RETRY_BACKOFF_MULTIPLIER
+    )
+    _transport_retry_max_backoff: float = PrivateAttr(
+        default=DEFAULT_TRANSPORT_RETRY_MAX_BACKOFF
+    )
+    _client_init_kwargs: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _api_key_candidates: list[Optional[str]] = PrivateAttr(default_factory=list)
+
+    def __init__(self, **kwargs):
+        transport_max_retries = max(
+            1, int(kwargs.pop("transport_max_retries", DEFAULT_TRANSPORT_MAX_RETRIES))
+        )
+        transport_retry_backoff = max(
+            0.0,
+            float(kwargs.pop("transport_retry_backoff", DEFAULT_TRANSPORT_RETRY_BACKOFF)),
+        )
+        transport_retry_backoff_multiplier = max(
+            1.0,
+            float(
+                kwargs.pop(
+                    "transport_retry_backoff_multiplier",
+                    DEFAULT_TRANSPORT_RETRY_BACKOFF_MULTIPLIER,
+                )
+            ),
+        )
+        transport_retry_max_backoff = max(
+            0.0,
+            float(
+                kwargs.pop(
+                    "transport_retry_max_backoff",
+                    DEFAULT_TRANSPORT_RETRY_MAX_BACKOFF,
+                )
+            ),
+        )
+        api_key_candidates = kwargs.pop("google_api_key_candidates", None)
+        client_init_kwargs = dict(kwargs)
+        super().__init__(**kwargs)
+        self._transport_max_retries = transport_max_retries
+        self._transport_retry_backoff = transport_retry_backoff
+        self._transport_retry_backoff_multiplier = transport_retry_backoff_multiplier
+        self._transport_retry_max_backoff = transport_retry_max_backoff
+        self._client_init_kwargs = client_init_kwargs
+        self._api_key_candidates = list(api_key_candidates or [kwargs.get("google_api_key")])
 
     def _normalize_content(self, response):
         content = response.content
@@ -24,8 +157,46 @@ class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
             response.content = "\n".join(t for t in texts if t)
         return response
 
+    def _retry_delay_seconds(self, attempt: int) -> float:
+        delay = self._transport_retry_backoff * (
+            self._transport_retry_backoff_multiplier ** (attempt - 1)
+        )
+        return min(delay, self._transport_retry_max_backoff)
+
+    def _build_retry_client(self, api_key: Optional[str]):
+        client_kwargs = dict(self._client_init_kwargs)
+        if api_key:
+            client_kwargs["google_api_key"] = api_key
+        else:
+            client_kwargs.pop("google_api_key", None)
+        return type(self)(**client_kwargs)
+
     def invoke(self, input, config=None, **kwargs):
-        return self._normalize_content(super().invoke(input, config, **kwargs))
+        last_error = None
+
+        for api_key_index, api_key in enumerate(self._api_key_candidates):
+            for attempt in range(1, self._transport_max_retries + 1):
+                try:
+                    retry_client = self._build_retry_client(api_key)
+                    response = ChatGoogleGenerativeAI.invoke(
+                        retry_client, input, config, **kwargs
+                    )
+                    return self._normalize_content(response)
+                except Exception as exc:
+                    last_error = exc
+                    if not _is_retryable_google_exception(exc):
+                        raise
+
+                    has_more_attempts = attempt < self._transport_max_retries
+                    has_more_api_keys = api_key_index < len(self._api_key_candidates) - 1
+                    if not (has_more_attempts or has_more_api_keys):
+                        raise
+
+                    sleep_seconds = self._retry_delay_seconds(attempt)
+                    if sleep_seconds > 0:
+                        time.sleep(sleep_seconds)
+
+        raise last_error
 
 
 class GoogleClient(BaseLLMClient):
@@ -37,10 +208,40 @@ class GoogleClient(BaseLLMClient):
     def get_llm(self) -> Any:
         """Return configured ChatGoogleGenerativeAI instance."""
         llm_kwargs = {"model": self.model}
+        api_key_candidates = _resolve_google_api_key_candidates(
+            self.kwargs.get("google_api_key")
+        )
 
-        for key in ("timeout", "max_retries", "google_api_key", "callbacks", "http_client", "http_async_client"):
+        for key in (
+            "timeout",
+            "max_retries",
+            "google_api_key",
+            "callbacks",
+            "http_client",
+            "http_async_client",
+            "transport_max_retries",
+            "transport_retry_backoff",
+            "transport_retry_backoff_multiplier",
+            "transport_retry_max_backoff",
+        ):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
+
+        llm_kwargs.setdefault("transport_max_retries", DEFAULT_TRANSPORT_MAX_RETRIES)
+        llm_kwargs.setdefault(
+            "transport_retry_backoff", DEFAULT_TRANSPORT_RETRY_BACKOFF
+        )
+        llm_kwargs.setdefault(
+            "transport_retry_backoff_multiplier",
+            DEFAULT_TRANSPORT_RETRY_BACKOFF_MULTIPLIER,
+        )
+        llm_kwargs.setdefault(
+            "transport_retry_max_backoff", DEFAULT_TRANSPORT_RETRY_MAX_BACKOFF
+        )
+
+        if api_key_candidates:
+            llm_kwargs["google_api_key"] = api_key_candidates[0]
+            llm_kwargs["google_api_key_candidates"] = api_key_candidates
 
         # Map thinking_level to appropriate API param based on model
         # Gemini 3 Pro: low, high

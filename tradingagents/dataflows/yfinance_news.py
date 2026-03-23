@@ -3,6 +3,7 @@
 import yfinance as yf
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from tradingagents.asset_utils import is_crypto_ticker
 
 
 def _extract_article_data(article: dict) -> dict:
@@ -46,6 +47,50 @@ def _extract_article_data(article: dict) -> dict:
         }
 
 
+def _dedupe_articles(articles: list[dict]) -> list[dict]:
+    deduped = []
+    seen = set()
+
+    for article in articles:
+        data = _extract_article_data(article)
+        key = (data["title"], data["link"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(article)
+
+    return deduped
+
+
+def _search_news(query: str, count: int = 20) -> list[dict]:
+    try:
+        search = yf.Search(
+            query=query,
+            news_count=count,
+            enable_fuzzy_query=True,
+        )
+        return list(search.news or [])
+    except Exception:
+        return []
+
+
+def _crypto_news_queries(ticker: str) -> list[str]:
+    normalized = ticker.upper()
+    base_symbol = normalized.split("-", 1)[0]
+    queries = [
+        normalized,
+        base_symbol,
+        f"{base_symbol} crypto",
+        f"{base_symbol} cryptocurrency",
+    ]
+
+    deduped = []
+    for query in queries:
+        if query not in deduped:
+            deduped.append(query)
+    return deduped
+
+
 def get_news_yfinance(
     ticker: str,
     start_date: str,
@@ -64,7 +109,13 @@ def get_news_yfinance(
     """
     try:
         stock = yf.Ticker(ticker)
-        news = stock.get_news(count=20)
+        news = list(stock.get_news(count=20) or [])
+
+        if is_crypto_ticker(ticker):
+            for query in _crypto_news_queries(ticker):
+                news.extend(_search_news(query, count=20))
+
+        news = _dedupe_articles(news)
 
         if not news:
             return f"No news found for {ticker}"

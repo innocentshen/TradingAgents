@@ -3,7 +3,7 @@
 from typing import Dict, Any
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph, START
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt.tool_node import ToolNode
 
 from tradingagents.agents import *
 from tradingagents.agents.utils.agent_states import AgentState

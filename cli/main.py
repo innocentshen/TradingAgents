@@ -1,6 +1,7 @@
 from typing import Optional
 import datetime
 import typer
+import questionary
 from pathlib import Path
 from functools import wraps
 from rich.console import Console
@@ -25,12 +26,19 @@ from rich.rule import Rule
 
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.llm_clients import create_llm_client
 from cli.models import AnalystType
 from cli.utils import *
 from cli.announcements import fetch_announcements, display_announcements
 from cli.stats_handler import StatsCallbackHandler
 
 console = Console()
+
+TRANSLATION_TIMEOUT_SECONDS = 120
+TRANSLATION_MAX_RETRIES = 1
+TRANSLATION_CHUNK_MAX_CHARS = 12000
+TRANSLATION_OPENAI_REASONING_EFFORT = "low"
+TRANSLATION_GOOGLE_THINKING_LEVEL = "minimal"
 
 app = typer.Typer(
     name="TradingAgents",
@@ -501,7 +509,9 @@ def get_user_selections():
     # Step 1: Ticker symbol
     console.print(
         create_question_box(
-            "Step 1: Ticker Symbol", "Enter the ticker symbol to analyze", "SPY"
+            "Step 1: Ticker Symbol",
+            "Enter the ticker symbol to analyze (e.g. SPY, BTC-USD)",
+            "SPY",
         )
     )
     selected_ticker = get_ticker()
@@ -575,6 +585,22 @@ def get_user_selections():
         )
         reasoning_effort = ask_openai_reasoning_effort()
 
+    # Step 8: Output preferences
+    console.print(
+        create_question_box(
+            "Step 8: Output Preferences",
+            "Choose whether to save as a single Markdown file and optionally translate it"
+        )
+    )
+    consolidate_output, translation_language = ask_output_preferences()
+
+    console.print(
+        "[green]Output mode:[/green] "
+        f"{'single file' if consolidate_output else 'folder'} | "
+        "[green]Translation:[/green] "
+        f"{translation_language or 'original language'}"
+    )
+
     return {
         "ticker": selected_ticker,
         "analysis_date": analysis_date,
@@ -586,6 +612,8 @@ def get_user_selections():
         "deep_thinker": selected_deep_thinker,
         "google_thinking_level": thinking_level,
         "openai_reasoning_effort": reasoning_effort,
+        "consolidate_output": consolidate_output,
+        "translation_language": translation_language,
     }
 
 
@@ -613,29 +641,200 @@ def get_analysis_date():
             )
 
 
-def save_report_to_disk(final_state, ticker: str, save_path: Path):
-    """Save complete analysis report to disk with organized subfolders."""
-    save_path.mkdir(parents=True, exist_ok=True)
+def ask_output_preferences() -> tuple[bool, str | None]:
+    """Ask how the final report should be saved."""
+    consolidate_output = questionary.confirm(
+        "Save the report as a single Markdown file?",
+        default=False,
+        style=questionary.Style(
+            [
+                ("selected", "fg:blue noinherit"),
+                ("highlighted", "fg:blue noinherit"),
+                ("pointer", "fg:blue noinherit"),
+            ]
+        ),
+    ).ask()
+    if consolidate_output is None:
+        console.print("\n[red]No output mode selected. Exiting...[/red]")
+        exit(1)
+
+    translation_language = questionary.text(
+        "Translate the saved report to which language? (Press Enter to skip)",
+        default="",
+        style=questionary.Style(
+            [
+                ("text", "fg:blue"),
+                ("highlighted", "noinherit"),
+            ]
+        ),
+    ).ask()
+    if translation_language is None:
+        console.print("\n[red]No translation preference provided. Exiting...[/red]")
+        exit(1)
+
+    normalized_language = translation_language.strip()
+    return consolidate_output, normalized_language or None
+
+
+def create_translation_llm(config: dict):
+    """Create a dedicated low-thinking translation model with bounded retries/timeouts."""
+    llm_kwargs = {
+        "timeout": TRANSLATION_TIMEOUT_SECONDS,
+        "max_retries": TRANSLATION_MAX_RETRIES,
+    }
+
+    provider = config.get("llm_provider", "").lower()
+    if provider == "google":
+        llm_kwargs["thinking_level"] = TRANSLATION_GOOGLE_THINKING_LEVEL
+    elif provider == "openai":
+        llm_kwargs["reasoning_effort"] = TRANSLATION_OPENAI_REASONING_EFFORT
+
+    return create_llm_client(
+        provider=config["llm_provider"],
+        model=config["quick_think_llm"],
+        base_url=config.get("backend_url"),
+        **llm_kwargs,
+    ).get_llm()
+
+
+def split_markdown_for_translation(
+    report_content: str, max_chars: int = TRANSLATION_CHUNK_MAX_CHARS
+) -> list[str]:
+    """Split long Markdown into manageable chunks while keeping paragraph boundaries."""
+    if len(report_content) <= max_chars:
+        return [report_content]
+
+    paragraphs = report_content.split("\n\n")
+    chunks = []
+    current_parts = []
+    current_len = 0
+
+    for paragraph in paragraphs:
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+
+        paragraph_len = len(paragraph) + 2
+        if current_parts and current_len + paragraph_len > max_chars:
+            chunks.append("\n\n".join(current_parts).strip())
+            current_parts = []
+            current_len = 0
+
+        if len(paragraph) > max_chars:
+            if current_parts:
+                chunks.append("\n\n".join(current_parts).strip())
+                current_parts = []
+                current_len = 0
+
+            for start in range(0, len(paragraph), max_chars):
+                chunks.append(paragraph[start : start + max_chars].strip())
+            continue
+
+        current_parts.append(paragraph)
+        current_len += paragraph_len
+
+    if current_parts:
+        chunks.append("\n\n".join(current_parts).strip())
+
+    return [chunk for chunk in chunks if chunk]
+
+
+def translate_report_markdown(
+    report_content: str,
+    target_language: str,
+    translator_llm,
+    progress_console: Optional[Console] = None,
+) -> str:
+    """Translate a Markdown report with the selected deep-thinking model."""
+    chunks = split_markdown_for_translation(report_content)
+    translated_chunks = []
+
+    def translate_chunk(chunk: str, index: int, total: int) -> str:
+        prompt = f"""You are a professional financial translator.
+
+Translate this Markdown report chunk into {target_language}.
+This is chunk {index} of {total} from one larger report.
+
+Requirements:
+- Preserve the full Markdown structure, including headings, lists, emphasis, tables, and code fences.
+- Translate all natural-language content accurately and completely.
+- Keep ticker symbols, company names, dates, numeric values, and financial terminology precise.
+- Do not add commentary, summaries, or extra sections.
+- Return only the translated Markdown for this chunk.
+
+<report_chunk>
+{chunk}
+</report_chunk>"""
+
+        response = translator_llm.invoke(prompt)
+        translated_content = extract_content_string(getattr(response, "content", response))
+
+        if not translated_content:
+            raise ValueError(
+                f"Translation model returned empty content for chunk {index}."
+            )
+
+        return translated_content.strip()
+
+    if progress_console:
+        progress_console.print(
+            f"[cyan]Translating report to {target_language} using the deep-thinking model...[/cyan]"
+        )
+        with progress_console.status(
+            f"Translating chunk 1/{len(chunks)}...", spinner="dots"
+        ) as status:
+            for index, chunk in enumerate(chunks, start=1):
+                status.update(f"Translating chunk {index}/{len(chunks)}...")
+                translated_chunks.append(translate_chunk(chunk, index, len(chunks)))
+    else:
+        for index, chunk in enumerate(chunks, start=1):
+            translated_chunks.append(translate_chunk(chunk, index, len(chunks)))
+
+    return "\n\n".join(translated_chunks).strip()
+
+
+def save_report_to_disk(
+    final_state,
+    ticker: str,
+    save_target: Path,
+    consolidate_output: bool = False,
+    translation_language: str | None = None,
+    translator_llm=None,
+    progress_console: Optional[Console] = None,
+):
+    """Save report to disk in folder or single-file mode."""
     sections = []
 
     # 1. Analysts
-    analysts_dir = save_path / "1_analysts"
+    analysts_dir = save_target / "1_analysts"
     analyst_parts = []
     if final_state.get("market_report"):
-        analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "market.md").write_text(final_state["market_report"])
+        if not consolidate_output:
+            analysts_dir.mkdir(parents=True, exist_ok=True)
+            (analysts_dir / "market.md").write_text(
+                final_state["market_report"], encoding="utf-8"
+            )
         analyst_parts.append(("Market Analyst", final_state["market_report"]))
     if final_state.get("sentiment_report"):
-        analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "sentiment.md").write_text(final_state["sentiment_report"])
+        if not consolidate_output:
+            analysts_dir.mkdir(parents=True, exist_ok=True)
+            (analysts_dir / "sentiment.md").write_text(
+                final_state["sentiment_report"], encoding="utf-8"
+            )
         analyst_parts.append(("Social Analyst", final_state["sentiment_report"]))
     if final_state.get("news_report"):
-        analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "news.md").write_text(final_state["news_report"])
+        if not consolidate_output:
+            analysts_dir.mkdir(parents=True, exist_ok=True)
+            (analysts_dir / "news.md").write_text(
+                final_state["news_report"], encoding="utf-8"
+            )
         analyst_parts.append(("News Analyst", final_state["news_report"]))
     if final_state.get("fundamentals_report"):
-        analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "fundamentals.md").write_text(final_state["fundamentals_report"])
+        if not consolidate_output:
+            analysts_dir.mkdir(parents=True, exist_ok=True)
+            (analysts_dir / "fundamentals.md").write_text(
+                final_state["fundamentals_report"], encoding="utf-8"
+            )
         analyst_parts.append(("Fundamentals Analyst", final_state["fundamentals_report"]))
     if analyst_parts:
         content = "\n\n".join(f"### {name}\n{text}" for name, text in analyst_parts)
@@ -643,20 +842,29 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
 
     # 2. Research
     if final_state.get("investment_debate_state"):
-        research_dir = save_path / "2_research"
+        research_dir = save_target / "2_research"
         debate = final_state["investment_debate_state"]
         research_parts = []
         if debate.get("bull_history"):
-            research_dir.mkdir(exist_ok=True)
-            (research_dir / "bull.md").write_text(debate["bull_history"])
+            if not consolidate_output:
+                research_dir.mkdir(parents=True, exist_ok=True)
+                (research_dir / "bull.md").write_text(
+                    debate["bull_history"], encoding="utf-8"
+                )
             research_parts.append(("Bull Researcher", debate["bull_history"]))
         if debate.get("bear_history"):
-            research_dir.mkdir(exist_ok=True)
-            (research_dir / "bear.md").write_text(debate["bear_history"])
+            if not consolidate_output:
+                research_dir.mkdir(parents=True, exist_ok=True)
+                (research_dir / "bear.md").write_text(
+                    debate["bear_history"], encoding="utf-8"
+                )
             research_parts.append(("Bear Researcher", debate["bear_history"]))
         if debate.get("judge_decision"):
-            research_dir.mkdir(exist_ok=True)
-            (research_dir / "manager.md").write_text(debate["judge_decision"])
+            if not consolidate_output:
+                research_dir.mkdir(parents=True, exist_ok=True)
+                (research_dir / "manager.md").write_text(
+                    debate["judge_decision"], encoding="utf-8"
+                )
             research_parts.append(("Research Manager", debate["judge_decision"]))
         if research_parts:
             content = "\n\n".join(f"### {name}\n{text}" for name, text in research_parts)
@@ -664,27 +872,39 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
 
     # 3. Trading
     if final_state.get("trader_investment_plan"):
-        trading_dir = save_path / "3_trading"
-        trading_dir.mkdir(exist_ok=True)
-        (trading_dir / "trader.md").write_text(final_state["trader_investment_plan"])
+        if not consolidate_output:
+            trading_dir = save_target / "3_trading"
+            trading_dir.mkdir(parents=True, exist_ok=True)
+            (trading_dir / "trader.md").write_text(
+                final_state["trader_investment_plan"], encoding="utf-8"
+            )
         sections.append(f"## III. Trading Team Plan\n\n### Trader\n{final_state['trader_investment_plan']}")
 
     # 4. Risk Management
     if final_state.get("risk_debate_state"):
-        risk_dir = save_path / "4_risk"
+        risk_dir = save_target / "4_risk"
         risk = final_state["risk_debate_state"]
         risk_parts = []
         if risk.get("aggressive_history"):
-            risk_dir.mkdir(exist_ok=True)
-            (risk_dir / "aggressive.md").write_text(risk["aggressive_history"])
+            if not consolidate_output:
+                risk_dir.mkdir(parents=True, exist_ok=True)
+                (risk_dir / "aggressive.md").write_text(
+                    risk["aggressive_history"], encoding="utf-8"
+                )
             risk_parts.append(("Aggressive Analyst", risk["aggressive_history"]))
         if risk.get("conservative_history"):
-            risk_dir.mkdir(exist_ok=True)
-            (risk_dir / "conservative.md").write_text(risk["conservative_history"])
+            if not consolidate_output:
+                risk_dir.mkdir(parents=True, exist_ok=True)
+                (risk_dir / "conservative.md").write_text(
+                    risk["conservative_history"], encoding="utf-8"
+                )
             risk_parts.append(("Conservative Analyst", risk["conservative_history"]))
         if risk.get("neutral_history"):
-            risk_dir.mkdir(exist_ok=True)
-            (risk_dir / "neutral.md").write_text(risk["neutral_history"])
+            if not consolidate_output:
+                risk_dir.mkdir(parents=True, exist_ok=True)
+                (risk_dir / "neutral.md").write_text(
+                    risk["neutral_history"], encoding="utf-8"
+                )
             risk_parts.append(("Neutral Analyst", risk["neutral_history"]))
         if risk_parts:
             content = "\n\n".join(f"### {name}\n{text}" for name, text in risk_parts)
@@ -692,15 +912,54 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
 
         # 5. Portfolio Manager
         if risk.get("judge_decision"):
-            portfolio_dir = save_path / "5_portfolio"
-            portfolio_dir.mkdir(exist_ok=True)
-            (portfolio_dir / "decision.md").write_text(risk["judge_decision"])
+            if not consolidate_output:
+                portfolio_dir = save_target / "5_portfolio"
+                portfolio_dir.mkdir(parents=True, exist_ok=True)
+                (portfolio_dir / "decision.md").write_text(
+                    risk["judge_decision"], encoding="utf-8"
+                )
             sections.append(f"## V. Portfolio Manager Decision\n\n### Portfolio Manager\n{risk['judge_decision']}")
 
-    # Write consolidated report
     header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-    (save_path / "complete_report.md").write_text(header + "\n\n".join(sections))
-    return save_path / "complete_report.md"
+    complete_report = header + "\n\n".join(sections)
+
+    translated_report = None
+    if translation_language:
+        if translator_llm is None:
+            raise ValueError("Translation requested, but no deep-thinking model is available.")
+        translated_report = translate_report_markdown(
+            complete_report,
+            translation_language,
+            translator_llm,
+            progress_console=progress_console,
+        )
+
+    if consolidate_output:
+        save_target.parent.mkdir(parents=True, exist_ok=True)
+        final_content = translated_report or complete_report
+        save_target.write_text(final_content, encoding="utf-8")
+        return {
+            "mode": "single_file",
+            "root": save_target,
+            "primary_report": save_target,
+            "translated_report": save_target if translated_report else None,
+        }
+
+    save_target.mkdir(parents=True, exist_ok=True)
+    complete_report_path = save_target / "complete_report.md"
+    complete_report_path.write_text(complete_report, encoding="utf-8")
+
+    translated_report_path = None
+    if translated_report:
+        translated_report_path = save_target / "complete_report_translated.md"
+        translated_report_path.write_text(translated_report, encoding="utf-8")
+
+    return {
+        "mode": "folder",
+        "root": save_target,
+        "primary_report": complete_report_path,
+        "translated_report": translated_report_path,
+    }
 
 
 def display_complete_report(final_state):
@@ -1148,16 +1407,51 @@ def run_analysis():
     save_choice = typer.prompt("Save report?", default="Y").strip().upper()
     if save_choice in ("Y", "YES", ""):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_path = Path.cwd() / "reports" / f"{selections['ticker']}_{timestamp}"
-        save_path_str = typer.prompt(
-            "Save path (press Enter for default)",
-            default=str(default_path)
+        translation_language = selections.get("translation_language")
+        consolidate_output = selections.get("consolidate_output", False)
+        if consolidate_output:
+            file_suffix = "_translated" if translation_language else ""
+            default_target = (
+                Path.cwd()
+                / "reports"
+                / f"{selections['ticker']}_{timestamp}{file_suffix}.md"
+            )
+            save_prompt = "Save file path (press Enter for default)"
+        else:
+            default_target = Path.cwd() / "reports" / f"{selections['ticker']}_{timestamp}"
+            save_prompt = "Save path (press Enter for default)"
+
+        save_target_str = typer.prompt(
+            save_prompt,
+            default=str(default_target)
         ).strip()
-        save_path = Path(save_path_str)
+        save_target = Path(save_target_str)
         try:
-            report_file = save_report_to_disk(final_state, selections["ticker"], save_path)
+            translator_llm = (
+                create_translation_llm(config) if translation_language else None
+            )
+            save_result = save_report_to_disk(
+                final_state,
+                selections["ticker"],
+                save_target,
+                consolidate_output=consolidate_output,
+                translation_language=translation_language,
+                translator_llm=translator_llm,
+                progress_console=console,
+            )
+            save_path = save_result["root"]
             console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
-            console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
+            console.print(
+                f"  [dim]Primary report:[/dim] {save_result['primary_report'].name}"
+            )
+            if translation_language and save_result["translated_report"]:
+                if save_result["translated_report"] == save_result["primary_report"]:
+                    console.print(f"  [dim]Language:[/dim] {translation_language}")
+                else:
+                    console.print(
+                        f"  [dim]Translated report ({translation_language}):[/dim] "
+                        f"{save_result['translated_report'].name}"
+                    )
         except Exception as e:
             console.print(f"[red]Error saving report: {e}[/red]")
 
@@ -1169,7 +1463,19 @@ def run_analysis():
 
 @app.command()
 def analyze():
-    run_analysis()
+    try:
+        run_analysis()
+    except Exception as exc:
+        console.print(f"\n[red]Analysis failed:[/red] {exc}")
+        if message_buffer.current_agent:
+            console.print(
+                f"[yellow]Last active agent:[/yellow] {message_buffer.current_agent}"
+            )
+        if any(message_buffer.report_sections.values()):
+            console.print(
+                "[dim]Partial reports were already written to the results directory.[/dim]"
+            )
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

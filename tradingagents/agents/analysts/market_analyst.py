@@ -3,6 +3,7 @@ import time
 import json
 from tradingagents.agents.utils.agent_utils import get_stock_data, get_indicators
 from tradingagents.dataflows.config import get_config
+from tradingagents.asset_utils import get_asset_context
 
 
 def create_market_analyst(llm):
@@ -10,7 +11,7 @@ def create_market_analyst(llm):
     def market_analyst_node(state):
         current_date = state["trade_date"]
         ticker = state["company_of_interest"]
-        company_name = state["company_of_interest"]
+        asset_context = get_asset_context(ticker)
 
         tools = [
             get_stock_data,
@@ -18,7 +19,7 @@ def create_market_analyst(llm):
         ]
 
         system_message = (
-            """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
+            f"""You are a trading assistant tasked with analyzing financial markets for a tradable {asset_context['asset_label']}. {asset_context['market_context']} Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
 
 Moving Averages:
 - close_50_sma: 50 SMA: A medium-term trend indicator. Usage: Identify trend direction and serve as dynamic support/resistance. Tips: It lags price; combine with faster indicators for timely signals.
@@ -57,7 +58,7 @@ Volume-Based Indicators:
                     " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
                     " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
                     " You have access to the following tools: {tool_names}.\n{system_message}"
-                    "For your reference, the current date is {current_date}. The company we want to look at is {ticker}",
+                    "For your reference, the current date is {current_date}. The asset we want to look at is {ticker}. Asset type: {asset_type}.",
                 ),
                 MessagesPlaceholder(variable_name="messages"),
             ]
@@ -67,6 +68,7 @@ Volume-Based Indicators:
         prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(ticker=ticker)
+        prompt = prompt.partial(asset_type=asset_context["asset_type"])
 
         chain = prompt | llm.bind_tools(tools)
 

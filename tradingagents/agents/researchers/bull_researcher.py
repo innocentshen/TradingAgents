@@ -1,10 +1,12 @@
 from langchain_core.messages import AIMessage
 import time
 import json
+from tradingagents.asset_utils import get_asset_context
 
 
 def create_bull_researcher(llm, memory):
     def bull_node(state) -> dict:
+        asset_context = get_asset_context(state["company_of_interest"])
         investment_debate_state = state["investment_debate_state"]
         history = investment_debate_state.get("history", "")
         bull_history = investment_debate_state.get("bull_history", "")
@@ -22,12 +24,12 @@ def create_bull_researcher(llm, memory):
         for i, rec in enumerate(past_memories, 1):
             past_memory_str += rec["recommendation"] + "\n\n"
 
-        prompt = f"""You are a Bull Analyst advocating for investing in the stock. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.
+        prompt = f"""You are a Bull Analyst advocating for a constructive view on the {asset_context['asset_label']}. Your task is to build a strong, evidence-based case emphasizing upside catalysts, structural strengths, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively. {asset_context['research_context']}
 
 Key points to focus on:
-- Growth Potential: Highlight the company's market opportunities, revenue projections, and scalability.
-- Competitive Advantages: Emphasize factors like unique products, strong branding, or dominant market positioning.
-- Positive Indicators: Use financial health, industry trends, and recent positive news as evidence.
+- Upside Catalysts: Highlight demand drivers, adoption trends, earnings growth, network expansion, or other relevant growth vectors.
+- Structural Advantages: Emphasize factors like liquidity, ecosystem strength, resilient business quality, strong branding, or dominant market positioning.
+- Positive Indicators: Use financial health or tokenomics, industry trends, and recent positive news as evidence.
 - Bear Counterpoints: Critically analyze the bear argument with specific data and sound reasoning, addressing concerns thoroughly and showing why the bull perspective holds stronger merit.
 - Engagement: Present your argument in a conversational style, engaging directly with the bear analyst's points and debating effectively rather than just listing data.
 
@@ -35,7 +37,7 @@ Resources available:
 Market research report: {market_research_report}
 Social media sentiment report: {sentiment_report}
 Latest world affairs news: {news_report}
-Company fundamentals report: {fundamentals_report}
+{asset_context['fundamentals_report_label']}: {fundamentals_report}
 Conversation history of the debate: {history}
 Last bear argument: {current_response}
 Reflections from similar situations and lessons learned: {past_memory_str}

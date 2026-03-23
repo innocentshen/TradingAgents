@@ -23,6 +23,17 @@ from .alpha_vantage import (
     get_global_news as get_alpha_vantage_global_news,
 )
 from .alpha_vantage_common import AlphaVantageRateLimitError
+from .binance import (
+    BinanceAPIError,
+    get_stock as get_binance_stock,
+    get_indicator as get_binance_indicator,
+    get_fundamentals as get_binance_fundamentals,
+    get_balance_sheet as get_binance_balance_sheet,
+    get_cashflow as get_binance_cashflow,
+    get_income_statement as get_binance_income_statement,
+    get_insider_transactions as get_binance_insider_transactions,
+)
+from tradingagents.asset_utils import is_crypto_ticker
 
 # Configuration and routing logic
 from .config import get_config
@@ -30,7 +41,7 @@ from .config import get_config
 # Tools organized by category
 TOOLS_CATEGORIES = {
     "core_stock_apis": {
-        "description": "OHLCV stock price data",
+        "description": "OHLCV asset price data",
         "tools": [
             "get_stock_data"
         ]
@@ -42,7 +53,7 @@ TOOLS_CATEGORIES = {
         ]
     },
     "fundamental_data": {
-        "description": "Company fundamentals",
+        "description": "Asset fundamentals or proxy data",
         "tools": [
             "get_fundamentals",
             "get_balance_sheet",
@@ -61,36 +72,53 @@ TOOLS_CATEGORIES = {
 }
 
 VENDOR_LIST = [
+    "binance",
     "yfinance",
     "alpha_vantage",
 ]
+
+CRYPTO_BINANCE_PREFERRED_METHODS = {
+    "get_stock_data",
+    "get_indicators",
+    "get_fundamentals",
+    "get_balance_sheet",
+    "get_cashflow",
+    "get_income_statement",
+    "get_insider_transactions",
+}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
     # core_stock_apis
     "get_stock_data": {
+        "binance": get_binance_stock,
         "alpha_vantage": get_alpha_vantage_stock,
         "yfinance": get_YFin_data_online,
     },
     # technical_indicators
     "get_indicators": {
+        "binance": get_binance_indicator,
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
     },
     # fundamental_data
     "get_fundamentals": {
+        "binance": get_binance_fundamentals,
         "alpha_vantage": get_alpha_vantage_fundamentals,
         "yfinance": get_yfinance_fundamentals,
     },
     "get_balance_sheet": {
+        "binance": get_binance_balance_sheet,
         "alpha_vantage": get_alpha_vantage_balance_sheet,
         "yfinance": get_yfinance_balance_sheet,
     },
     "get_cashflow": {
+        "binance": get_binance_cashflow,
         "alpha_vantage": get_alpha_vantage_cashflow,
         "yfinance": get_yfinance_cashflow,
     },
     "get_income_statement": {
+        "binance": get_binance_income_statement,
         "alpha_vantage": get_alpha_vantage_income_statement,
         "yfinance": get_yfinance_income_statement,
     },
@@ -104,6 +132,7 @@ VENDOR_METHODS = {
         "alpha_vantage": get_alpha_vantage_global_news,
     },
     "get_insider_transactions": {
+        "binance": get_binance_insider_transactions,
         "alpha_vantage": get_alpha_vantage_insider_transactions,
         "yfinance": get_yfinance_insider_transactions,
     },
@@ -131,6 +160,14 @@ def get_vendor(category: str, method: str = None) -> str:
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
 
+
+def _extract_symbol_from_call(method: str, args, kwargs) -> str | None:
+    if method in CRYPTO_BINANCE_PREFERRED_METHODS:
+        if args:
+            return args[0]
+        return kwargs.get("symbol") or kwargs.get("ticker")
+    return None
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
@@ -147,6 +184,14 @@ def route_to_vendor(method: str, *args, **kwargs):
         if vendor not in fallback_vendors:
             fallback_vendors.append(vendor)
 
+    symbol = _extract_symbol_from_call(method, args, kwargs)
+    if symbol and is_crypto_ticker(symbol):
+        crypto_priority = ["binance", "yfinance", "alpha_vantage"]
+        prioritized = [vendor for vendor in crypto_priority if vendor in all_available_vendors]
+        fallback_vendors = prioritized + [
+            vendor for vendor in fallback_vendors if vendor not in prioritized
+        ]
+
     for vendor in fallback_vendors:
         if vendor not in VENDOR_METHODS[method]:
             continue
@@ -158,5 +203,7 @@ def route_to_vendor(method: str, *args, **kwargs):
             return impl_func(*args, **kwargs)
         except AlphaVantageRateLimitError:
             continue  # Only rate limits trigger fallback
+        except BinanceAPIError:
+            continue
 
     raise RuntimeError(f"No available vendor for '{method}'")

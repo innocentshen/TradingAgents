@@ -43,11 +43,11 @@ def get_insider_transactions(
     ticker: Annotated[str, "ticker symbol"],
 ) -> str:
     """
-    Retrieve insider transaction information about a company.
+    Retrieve insider transaction information when applicable to the asset.
     Uses the configured news_data vendor.
     Args:
-        ticker (str): Ticker symbol of the company
+        ticker (str): Ticker symbol of the asset
     Returns:
-        str: A report of insider transaction data
+        str: A report of insider transaction data or an applicability note
     """
     return route_to_vendor("get_insider_transactions", ticker)

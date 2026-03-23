@@ -20,11 +20,13 @@ DEFAULT_CONFIG = {
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 100,
     # Data vendor configuration
+    # Optional crypto on-chain enrichment: set GLASSNODE_API_KEY to enable
+    # Glassnode metrics inside crypto fundamentals reports.
     # Category-level configuration (default for all tools in category)
     "data_vendors": {
-        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
-        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
-        "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
+        "core_stock_apis": "yfinance",       # Options: binance, alpha_vantage, yfinance
+        "technical_indicators": "yfinance",  # Options: binance, alpha_vantage, yfinance
+        "fundamental_data": "yfinance",      # Options: binance, alpha_vantage, yfinance
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
     },
     # Tool-level configuration (takes precedence over category-level)

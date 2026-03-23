@@ -6,7 +6,7 @@ import json
 from datetime import date
 from typing import Dict, Any, Tuple, List, Optional
 
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt.tool_node import ToolNode
 
 from tradingagents.llm_clients import create_llm_client
 

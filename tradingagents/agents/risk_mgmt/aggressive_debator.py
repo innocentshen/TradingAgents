@@ -1,9 +1,11 @@
 import time
 import json
+from tradingagents.asset_utils import get_asset_context
 
 
 def create_aggressive_debator(llm):
     def aggressive_node(state) -> dict:
+        asset_context = get_asset_context(state["company_of_interest"])
         risk_debate_state = state["risk_debate_state"]
         history = risk_debate_state.get("history", "")
         aggressive_history = risk_debate_state.get("aggressive_history", "")
@@ -27,7 +29,7 @@ Your task is to create a compelling case for the trader's decision by questionin
 Market Research Report: {market_research_report}
 Social Media Sentiment Report: {sentiment_report}
 Latest World Affairs Report: {news_report}
-Company Fundamentals Report: {fundamentals_report}
+{asset_context['fundamentals_report_label']}: {fundamentals_report}
 Here is the current conversation history: {history} Here are the last arguments from the conservative analyst: {current_conservative_response} Here are the last arguments from the neutral analyst: {current_neutral_response}. If there are no responses from the other viewpoints, do not hallucinate and just present your point.
 
 Engage actively by addressing any specific concerns raised, refuting the weaknesses in their logic, and asserting the benefits of risk-taking to outpace market norms. Maintain a focus on debating and persuading, not just presenting data. Challenge each counterpoint to underscore why a high-risk approach is optimal. Output conversationally as if you are speaking without any special formatting."""
