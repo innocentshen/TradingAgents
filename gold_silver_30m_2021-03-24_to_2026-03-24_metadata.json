@@ -1,0 +1,73 @@
+{
+  "source": "Dukascopy via dukascopy-node",
+  "instrument_type": "spot precious metals",
+  "symbols": {
+    "gold": "XAUUSD",
+    "silver": "XAGUSD"
+  },
+  "timeframe": "30m",
+  "price_type": "bid",
+  "volume_included": true,
+  "requested_start_date": "2021-03-24",
+  "requested_end": "now",
+  "generated_at_utc": "2026-03-24T10:38:13.322882+00:00",
+  "files": {
+    "gold_30m_2021-03-24_to_2026-03-24.csv": {
+      "symbol": "XAUUSD",
+      "metal": "gold",
+      "rows": 59126,
+      "first_bar_utc": "2021-03-24 00:00:00",
+      "last_bar_utc": "2026-03-24 09:30:00",
+      "columns": [
+        "symbol",
+        "metal",
+        "timestamp_ms",
+        "timestamp_utc",
+        "timestamp_shanghai",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ]
+    },
+    "silver_30m_2021-03-24_to_2026-03-24.csv": {
+      "symbol": "XAGUSD",
+      "metal": "silver",
+      "rows": 59129,
+      "first_bar_utc": "2021-03-24 00:00:00",
+      "last_bar_utc": "2026-03-24 10:30:00",
+      "columns": [
+        "symbol",
+        "metal",
+        "timestamp_ms",
+        "timestamp_utc",
+        "timestamp_shanghai",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ]
+    },
+    "gold_silver_30m_2021-03-24_to_2026-03-24.csv": {
+      "symbol": "XAUUSD+XAGUSD",
+      "metal": "gold+silver",
+      "rows": 118255,
+      "first_bar_utc": "2021-03-24 00:00:00",
+      "last_bar_utc": "2026-03-24 10:30:00",
+      "columns": [
+        "symbol",
+        "metal",
+        "timestamp_ms",
+        "timestamp_utc",
+        "timestamp_shanghai",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ]
+    }
+  }
+}
