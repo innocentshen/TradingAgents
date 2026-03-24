@@ -3,7 +3,12 @@
 import yfinance as yf
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from tradingagents.asset_utils import is_crypto_ticker
+from tradingagents.asset_utils import (
+    get_proxy_note,
+    is_commodity_ticker,
+    is_crypto_ticker,
+    resolve_data_symbol,
+)
 
 
 def _extract_article_data(article: dict) -> dict:
@@ -91,6 +96,24 @@ def _crypto_news_queries(ticker: str) -> list[str]:
     return deduped
 
 
+def _commodity_news_queries(ticker: str) -> list[str]:
+    normalized = ticker.upper()
+    proxy_symbol = resolve_data_symbol(normalized, "news")
+    queries = [
+        proxy_symbol,
+        "gold",
+        "spot gold",
+        "gold price",
+        "gold ETF",
+    ]
+
+    deduped = []
+    for query in queries:
+        if query not in deduped:
+            deduped.append(query)
+    return deduped
+
+
 def get_news_yfinance(
     ticker: str,
     start_date: str,
@@ -108,11 +131,17 @@ def get_news_yfinance(
         Formatted string containing news articles
     """
     try:
-        stock = yf.Ticker(ticker)
+        fetch_ticker = resolve_data_symbol(ticker, "news")
+        proxy_note = get_proxy_note(ticker, "news")
+
+        stock = yf.Ticker(fetch_ticker)
         news = list(stock.get_news(count=20) or [])
 
         if is_crypto_ticker(ticker):
             for query in _crypto_news_queries(ticker):
+                news.extend(_search_news(query, count=20))
+        elif is_commodity_ticker(ticker):
+            for query in _commodity_news_queries(ticker):
                 news.extend(_search_news(query, count=20))
 
         news = _dedupe_articles(news)
@@ -147,7 +176,13 @@ def get_news_yfinance(
         if filtered_count == 0:
             return f"No news found for {ticker} between {start_date} and {end_date}"
 
-        return f"## {ticker} News, from {start_date} to {end_date}:\n\n{news_str}"
+        header = f"## {ticker} News, from {start_date} to {end_date}:\n\n"
+        if fetch_ticker != ticker.upper():
+            header += f"Source symbol used: {fetch_ticker}\n\n"
+        if proxy_note:
+            header += proxy_note + "\n\n"
+
+        return header + news_str
 
     except Exception as e:
         return f"Error fetching news for {ticker}: {str(e)}"

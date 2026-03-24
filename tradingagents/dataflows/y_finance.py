@@ -4,7 +4,13 @@ from dateutil.relativedelta import relativedelta
 import yfinance as yf
 import os
 from .stockstats_utils import StockstatsUtils, _clean_dataframe
-from tradingagents.asset_utils import is_crypto_ticker
+from tradingagents.asset_utils import (
+    get_commodity_profile,
+    get_proxy_note,
+    is_commodity_ticker,
+    is_crypto_ticker,
+    resolve_data_symbol,
+)
 
 
 def _safe_fast_info(ticker_obj) -> dict:
@@ -25,47 +31,74 @@ def _not_applicable_for_crypto(ticker: str, dataset_name: str) -> str:
         "market structure, adoption, and macro/regulatory drivers."
     )
 
+
+def _not_applicable_for_commodity(ticker: str, dataset_name: str) -> str:
+    profile = get_commodity_profile(ticker)
+    display_name = profile["display_name"] if profile else ticker.upper()
+    return (
+        f"# {dataset_name} for {ticker.upper()}\n"
+        f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"Not applicable: {ticker.upper()} maps to {display_name}, which is a macro/commodity "
+        "asset rather than a public company.\n\n"
+        "Use macro drivers instead: real rates, inflation expectations, USD strength, "
+        "geopolitics, central-bank buying, physical supply-demand, and ETF/futures flows."
+    )
+
 def get_YFin_data_online(
     symbol: Annotated[str, "ticker symbol of the asset"],
     start_date: Annotated[str, "Start date in yyyy-mm-dd format"],
     end_date: Annotated[str, "End date in yyyy-mm-dd format"],
 ):
+    try:
+        datetime.strptime(start_date, "%Y-%m-%d")
+        datetime.strptime(end_date, "%Y-%m-%d")
+        fetch_symbol = resolve_data_symbol(symbol, "market")
+        proxy_note = get_proxy_note(symbol, "market")
 
-    datetime.strptime(start_date, "%Y-%m-%d")
-    datetime.strptime(end_date, "%Y-%m-%d")
+        # Create ticker object
+        ticker = yf.Ticker(fetch_symbol)
 
-    # Create ticker object
-    ticker = yf.Ticker(symbol.upper())
+        # Fetch historical data for the specified date range
+        data = ticker.history(start=start_date, end=end_date)
 
-    # Fetch historical data for the specified date range
-    data = ticker.history(start=start_date, end=end_date)
+        # Check if data is empty
+        if data.empty:
+            return (
+                f"No data found for symbol '{symbol}' between {start_date} and {end_date}"
+            )
 
-    # Check if data is empty
-    if data.empty:
-        return (
-            f"No data found for symbol '{symbol}' between {start_date} and {end_date}"
-        )
+        # Remove timezone info from index for cleaner output
+        if data.index.tz is not None:
+            data.index = data.index.tz_localize(None)
 
-    # Remove timezone info from index for cleaner output
-    if data.index.tz is not None:
-        data.index = data.index.tz_localize(None)
+        # Round numerical values to 2 decimal places for cleaner display
+        numeric_columns = ["Open", "High", "Low", "Close", "Adj Close"]
+        for col in numeric_columns:
+            if col in data.columns:
+                data[col] = data[col].round(2)
 
-    # Round numerical values to 2 decimal places for cleaner display
-    numeric_columns = ["Open", "High", "Low", "Close", "Adj Close"]
-    for col in numeric_columns:
-        if col in data.columns:
-            data[col] = data[col].round(2)
+        # Convert DataFrame to CSV string
+        csv_string = data.to_csv()
 
-    # Convert DataFrame to CSV string
-    csv_string = data.to_csv()
+        # Add header information
+        if is_crypto_ticker(symbol):
+            data_label = "Crypto asset price data"
+        elif is_commodity_ticker(symbol):
+            data_label = "Commodity proxy price data"
+        else:
+            data_label = "Stock data"
 
-    # Add header information
-    data_label = "Crypto asset price data" if is_crypto_ticker(symbol) else "Stock data"
-    header = f"# {data_label} for {symbol.upper()} from {start_date} to {end_date}\n"
-    header += f"# Total records: {len(data)}\n"
-    header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        header = f"# {data_label} for {symbol.upper()} from {start_date} to {end_date}\n"
+        if fetch_symbol != symbol.upper():
+            header += f"# Source symbol used: {fetch_symbol}\n"
+        header += f"# Total records: {len(data)}\n"
+        header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        if proxy_note:
+            header += proxy_note + "\n\n"
 
-    return header + csv_string
+        return header + csv_string
+    except Exception as e:
+        return f"Error retrieving price data for {symbol.upper()}: {str(e)}"
 
 def get_stock_stats_indicators_window(
     symbol: Annotated[str, "ticker symbol of the asset"],
@@ -197,6 +230,7 @@ def get_stock_stats_indicators_window(
 
     result_str = (
         f"## {indicator} values from {before.strftime('%Y-%m-%d')} to {end_date}:\n\n"
+        + (f"{get_proxy_note(symbol, 'technical')}\n\n" if get_proxy_note(symbol, "technical") else "")
         + ind_string
         + "\n\n"
         + best_ind_params.get(indicator, "No description available.")
@@ -222,6 +256,7 @@ def _get_stock_stats_bulk(
     
     config = get_config()
     online = config["data_vendors"]["technical_indicators"] != "local"
+    fetch_symbol = resolve_data_symbol(symbol, "technical")
     
     if not online:
         # Local data path
@@ -229,7 +264,7 @@ def _get_stock_stats_bulk(
             data = pd.read_csv(
                 os.path.join(
                     config.get("data_cache_dir", "data"),
-                    f"{symbol}-YFin-data-2015-01-01-2025-03-25.csv",
+                    f"{fetch_symbol}-YFin-data-2015-01-01-2025-03-25.csv",
                 ),
                 on_bad_lines="skip",
             )
@@ -249,14 +284,14 @@ def _get_stock_stats_bulk(
 
         data_file = os.path.join(
             config["data_cache_dir"],
-            f"{symbol}-YFin-data-{start_date_str}-{end_date_str}.csv",
+            f"{fetch_symbol}-YFin-data-{start_date_str}-{end_date_str}.csv",
         )
 
         if os.path.exists(data_file):
             data = pd.read_csv(data_file, on_bad_lines="skip")
         else:
             data = yf.download(
-                symbol,
+                fetch_symbol,
                 start=start_date_str,
                 end=end_date_str,
                 multi_level_index=False,
@@ -319,6 +354,28 @@ def get_fundamentals(
     curr_date: Annotated[str, "current date (not used for yfinance)"] = None
 ):
     """Get fundamentals or asset-overview data from yfinance."""
+    if is_commodity_ticker(ticker):
+        profile = get_commodity_profile(ticker)
+        market_proxy = resolve_data_symbol(ticker, "market")
+        header = (
+            f"# Macro Drivers Report for {ticker.upper()}\n"
+            f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        )
+        lines = [
+            f"{ticker.upper()} is not a public company. It represents {profile['display_name']} ({profile['macro_label']}).",
+            "Traditional equity fundamentals such as revenue, EPS, margins, debt-to-equity, "
+            "cash flow statements, and insider transactions do not apply.",
+            f"For tradable market proxy analysis in Yahoo Finance, use {market_proxy} explicitly.",
+            "",
+            "Primary macro/fundamental drivers:",
+            "- Real interest rates and the opportunity cost of holding a non-yielding asset",
+            "- Inflation expectations and currency debasement concerns",
+            "- USD strength and Treasury-yield direction",
+            "- Geopolitical stress, safe-haven demand, and ETF/futures flows",
+            "- Central-bank buying, jewelry demand, industrial demand, mining supply, and recycling",
+        ]
+        return header + "\n".join(lines)
+
     try:
         ticker_obj = yf.Ticker(ticker.upper())
         info = ticker_obj.info or {}
@@ -414,6 +471,8 @@ def get_balance_sheet(
     """Get balance sheet data from yfinance."""
     if is_crypto_ticker(ticker):
         return _not_applicable_for_crypto(ticker, "Balance Sheet")
+    if is_commodity_ticker(ticker):
+        return _not_applicable_for_commodity(ticker, "Balance Sheet")
 
     try:
         ticker_obj = yf.Ticker(ticker.upper())
@@ -447,6 +506,8 @@ def get_cashflow(
     """Get cash flow data from yfinance."""
     if is_crypto_ticker(ticker):
         return _not_applicable_for_crypto(ticker, "Cash Flow")
+    if is_commodity_ticker(ticker):
+        return _not_applicable_for_commodity(ticker, "Cash Flow")
 
     try:
         ticker_obj = yf.Ticker(ticker.upper())
@@ -480,6 +541,8 @@ def get_income_statement(
     """Get income statement data from yfinance."""
     if is_crypto_ticker(ticker):
         return _not_applicable_for_crypto(ticker, "Income Statement")
+    if is_commodity_ticker(ticker):
+        return _not_applicable_for_commodity(ticker, "Income Statement")
 
     try:
         ticker_obj = yf.Ticker(ticker.upper())
@@ -511,6 +574,8 @@ def get_insider_transactions(
     """Get insider transactions data from yfinance."""
     if is_crypto_ticker(ticker):
         return _not_applicable_for_crypto(ticker, "Insider Transactions")
+    if is_commodity_ticker(ticker):
+        return _not_applicable_for_commodity(ticker, "Insider Transactions")
 
     try:
         ticker_obj = yf.Ticker(ticker.upper())

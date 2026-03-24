@@ -4,6 +4,7 @@ from stockstats import wrap
 from typing import Annotated
 import os
 from .config import get_config
+from tradingagents.asset_utils import resolve_data_symbol
 
 
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
@@ -31,6 +32,7 @@ class StockstatsUtils:
         ],
     ):
         config = get_config()
+        fetch_symbol = resolve_data_symbol(symbol, "technical")
 
         today_date = pd.Timestamp.today()
         curr_date_dt = pd.to_datetime(curr_date)
@@ -45,14 +47,14 @@ class StockstatsUtils:
 
         data_file = os.path.join(
             config["data_cache_dir"],
-            f"{symbol}-YFin-data-{start_date_str}-{end_date_str}.csv",
+            f"{fetch_symbol}-YFin-data-{start_date_str}-{end_date_str}.csv",
         )
 
         if os.path.exists(data_file):
             data = pd.read_csv(data_file, on_bad_lines="skip")
         else:
             data = yf.download(
-                symbol,
+                fetch_symbol,
                 start=start_date_str,
                 end=end_date_str,
                 multi_level_index=False,

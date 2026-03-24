@@ -1,5 +1,6 @@
 import time
 import json
+from tradingagents.agents.utils.prompt_utils import compact_text
 
 
 def create_risk_manager(llm, memory):
@@ -7,13 +8,23 @@ def create_risk_manager(llm, memory):
 
         company_name = state["company_of_interest"]
 
-        history = state["risk_debate_state"]["history"]
+        history = compact_text(
+            state["risk_debate_state"]["history"],
+            max_chars=14000,
+            label="risk debate history",
+            keep="tail",
+        )
         risk_debate_state = state["risk_debate_state"]
         market_research_report = state["market_report"]
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
         sentiment_report = state["sentiment_report"]
-        trader_plan = state["investment_plan"]
+        trader_plan = compact_text(
+            state["investment_plan"],
+            max_chars=9000,
+            label="trader plan",
+            keep="tail",
+        )
 
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
@@ -21,6 +32,12 @@ def create_risk_manager(llm, memory):
         past_memory_str = ""
         for i, rec in enumerate(past_memories, 1):
             past_memory_str += rec["recommendation"] + "\n\n"
+        past_memory_str = compact_text(
+            past_memory_str,
+            max_chars=4000,
+            label="past reflections",
+            keep="tail",
+        )
 
         prompt = f"""As the Risk Management Judge and Debate Facilitator, your goal is to evaluate the debate between three risk analysts—Aggressive, Neutral, and Conservative—and determine the best course of action for the trader. Your decision must result in a clear recommendation: Buy, Sell, or Hold. Choose Hold only if strongly justified by specific arguments, not as a fallback when all sides seem valid. Strive for clarity and decisiveness.
 

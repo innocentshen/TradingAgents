@@ -1,0 +1,3 @@
+I apologize, but I am unable to retrieve historical price data for "XAU" or "XAUUSD" using the available tools. Without this foundational data, I cannot proceed with the technical analysis, generate indicators, or provide a trading proposal for this asset.
+
+Please check the ticker symbol and ensure it is listed within the available market data provider's database. If you would like me to analyze a different asset, please provide the correct ticker symbol.

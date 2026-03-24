@@ -2,13 +2,19 @@ import functools
 import time
 import json
 from tradingagents.asset_utils import get_asset_context
+from tradingagents.agents.utils.prompt_utils import compact_text
 
 
 def create_trader(llm, memory):
     def trader_node(state, name):
         asset_name = state["company_of_interest"]
         asset_context = get_asset_context(asset_name)
-        investment_plan = state["investment_plan"]
+        investment_plan = compact_text(
+            state["investment_plan"],
+            max_chars=9000,
+            label="investment plan",
+            keep="tail",
+        )
         market_research_report = state["market_report"]
         sentiment_report = state["sentiment_report"]
         news_report = state["news_report"]
@@ -23,6 +29,12 @@ def create_trader(llm, memory):
                 past_memory_str += rec["recommendation"] + "\n\n"
         else:
             past_memory_str = "No past memories found."
+        past_memory_str = compact_text(
+            past_memory_str,
+            max_chars=4000,
+            label="past reflections",
+            keep="tail",
+        )
 
         context = {
             "role": "user",

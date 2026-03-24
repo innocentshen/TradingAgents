@@ -1,10 +1,16 @@
 import time
 import json
+from tradingagents.agents.utils.prompt_utils import compact_text
 
 
 def create_research_manager(llm, memory):
     def research_manager_node(state) -> dict:
-        history = state["investment_debate_state"].get("history", "")
+        history = compact_text(
+            state["investment_debate_state"].get("history", ""),
+            max_chars=14000,
+            label="investment debate history",
+            keep="tail",
+        )
         market_research_report = state["market_report"]
         sentiment_report = state["sentiment_report"]
         news_report = state["news_report"]
@@ -18,6 +24,12 @@ def create_research_manager(llm, memory):
         past_memory_str = ""
         for i, rec in enumerate(past_memories, 1):
             past_memory_str += rec["recommendation"] + "\n\n"
+        past_memory_str = compact_text(
+            past_memory_str,
+            max_chars=4000,
+            label="past reflections",
+            keep="tail",
+        )
 
         prompt = f"""As the portfolio manager and debate facilitator, your role is to critically evaluate this round of debate and make a definitive decision: align with the bear analyst, the bull analyst, or choose Hold only if it is strongly justified based on the arguments presented.
 

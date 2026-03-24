@@ -1,60 +1,19 @@
 import os
-import time
 from typing import Any, Optional
 
-import httpx
 from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import PrivateAttr
 
 from .base_client import BaseLLMClient
+from .transport_retry import (
+    DEFAULT_TRANSPORT_MAX_RETRIES,
+    DEFAULT_TRANSPORT_RETRY_BACKOFF,
+    DEFAULT_TRANSPORT_RETRY_BACKOFF_MULTIPLIER,
+    DEFAULT_TRANSPORT_RETRY_MAX_BACKOFF,
+    is_retryable_transport_exception,
+    sleep_before_retry,
+)
 from .validators import validate_model
-
-DEFAULT_TRANSPORT_MAX_RETRIES = 4
-DEFAULT_TRANSPORT_RETRY_BACKOFF = 1.0
-DEFAULT_TRANSPORT_RETRY_BACKOFF_MULTIPLIER = 2.0
-DEFAULT_TRANSPORT_RETRY_MAX_BACKOFF = 12.0
-
-RETRYABLE_EXCEPTION_NAME_MARKERS = (
-    "transporterror",
-    "timeoutexception",
-    "remoteprotocolerror",
-    "serviceunavailable",
-    "internalservererror",
-    "deadlineexceeded",
-    "resourceexhausted",
-    "toomanyrequests",
-)
-
-RETRYABLE_MESSAGE_MARKERS = (
-    "server disconnected without sending a response",
-    "connection reset",
-    "connection aborted",
-    "connection refused",
-    "connection dropped",
-    "temporarily unavailable",
-    "deadline exceeded",
-    "timed out",
-    "timeout",
-    "503",
-    "502",
-    "504",
-    "429",
-    "rate limit",
-    "resource exhausted",
-    "remote protocol error",
-)
-
-NON_RETRYABLE_MESSAGE_MARKERS = (
-    "api key not valid",
-    "permission denied",
-    "forbidden",
-    "invalid argument",
-    "unsupported",
-    "unauthenticated",
-    "authentication",
-    "401",
-    "403",
-)
 
 
 def _unique_non_empty(values: list[Optional[str]]) -> list[str]:
@@ -75,21 +34,6 @@ def _resolve_google_api_key_candidates(explicit_key: Optional[str] = None) -> li
             os.getenv("GEMINI_API_KEY"),
         ]
     )
-
-
-def _is_retryable_google_exception(exc: Exception) -> bool:
-    if isinstance(exc, httpx.TransportError):
-        return True
-
-    message = str(exc).lower()
-    if any(marker in message for marker in NON_RETRYABLE_MESSAGE_MARKERS):
-        return False
-
-    exc_name = exc.__class__.__name__.lower()
-    if any(marker in exc_name for marker in RETRYABLE_EXCEPTION_NAME_MARKERS):
-        return True
-
-    return any(marker in message for marker in RETRYABLE_MESSAGE_MARKERS)
 
 
 class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
@@ -138,6 +82,14 @@ class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
         )
         api_key_candidates = kwargs.pop("google_api_key_candidates", None)
         client_init_kwargs = dict(kwargs)
+        client_init_kwargs.update(
+            {
+                "transport_max_retries": transport_max_retries,
+                "transport_retry_backoff": transport_retry_backoff,
+                "transport_retry_backoff_multiplier": transport_retry_backoff_multiplier,
+                "transport_retry_max_backoff": transport_retry_max_backoff,
+            }
+        )
         super().__init__(**kwargs)
         self._transport_max_retries = transport_max_retries
         self._transport_retry_backoff = transport_retry_backoff
@@ -156,12 +108,6 @@ class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
             ]
             response.content = "\n".join(t for t in texts if t)
         return response
-
-    def _retry_delay_seconds(self, attempt: int) -> float:
-        delay = self._transport_retry_backoff * (
-            self._transport_retry_backoff_multiplier ** (attempt - 1)
-        )
-        return min(delay, self._transport_retry_max_backoff)
 
     def _build_retry_client(self, api_key: Optional[str]):
         client_kwargs = dict(self._client_init_kwargs)
@@ -184,7 +130,7 @@ class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
                     return self._normalize_content(response)
                 except Exception as exc:
                     last_error = exc
-                    if not _is_retryable_google_exception(exc):
+                    if not is_retryable_transport_exception(exc):
                         raise
 
                     has_more_attempts = attempt < self._transport_max_retries
@@ -192,9 +138,12 @@ class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
                     if not (has_more_attempts or has_more_api_keys):
                         raise
 
-                    sleep_seconds = self._retry_delay_seconds(attempt)
-                    if sleep_seconds > 0:
-                        time.sleep(sleep_seconds)
+                    sleep_before_retry(
+                        attempt,
+                        self._transport_retry_backoff,
+                        self._transport_retry_backoff_multiplier,
+                        self._transport_retry_max_backoff,
+                    )
 
         raise last_error
 
